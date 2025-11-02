@@ -8,9 +8,9 @@ services:
       dockerfile: Dockerfile_China
       target: runtime
     container_name: claude-proxy
-    ports:
+    ports:  
       # 统一端口：前端界面 + API + 管理接口
-      - '3003:3000'
+      - '3088:3088'
     volumes:
       # 配置目录持久化
       - ./.config:/app/.config
