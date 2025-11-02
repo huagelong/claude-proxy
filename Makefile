@@ -151,7 +151,7 @@ build-current: build-frontend ## Build for current platform only
 	@echo "$(COLOR_CYAN)🔨 Building for current platform...$(COLOR_RESET)"
 	@mkdir -p $(BACKEND_DIR)/frontend/dist $(DIST_DIR)
 	@cp -r $(FRONTEND_DIR)/dist/* $(BACKEND_DIR)/frontend/dist/
-	cd $(BACKEND_DIR) && go build -ldflags "$(LDFLAGS)" -o dist/$(BINARY_PREFIX) .
+	cd $(BACKEND_DIR) && go mod download && go mod tidy && go build -ldflags "$(LDFLAGS)" -o dist/$(BINARY_PREFIX) .
 	@echo "$(COLOR_GREEN)✅ Build complete: $(DIST_DIR)/$(BINARY_PREFIX)$(COLOR_RESET)"
 
 # ==============================================================================
