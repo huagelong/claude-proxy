@@ -30,11 +30,8 @@ frontend/node_modules/.vite
 *~
 
 # 环境配置
-.env
 .env.local
 .env.*.local
-backend/.env
-backend-go/.env
 
 # 配置文件（运行时生成）
 .config
