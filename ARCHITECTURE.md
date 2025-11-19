@@ -84,6 +84,7 @@ import { ConfigManager } from '@backend/config/config-manager'
 | **配置系统**   | `backend-go/internal/config/`     | 配置文件管理和热重载        |
 | **HTTP 处理**  | `backend-go/internal/handlers/`   | REST API 路由和业务逻辑     |
 | **中间件**     | `backend-go/internal/middleware/` | 认证、日志、CORS            |
+| **会话管理**   | `backend-go/internal/session/`    | Responses API 会话跟踪      |
 
 ## 设计模式
 
@@ -108,6 +109,7 @@ type Provider interface {
 - `OpenAI`: 支持 OpenAI API 和兼容 API
 - `Gemini`: Google Gemini API
 - `Claude`: Anthropic Claude API (直接透传)
+- `Responses`: Codex Responses API (支持会话管理)
 - `OpenAI Old`: 旧版 OpenAI API 兼容
 
 ### 2. 配置管理器模式
@@ -135,7 +137,205 @@ func (cm *ConfigManager) GetNextAPIKey(channelID string) (string, error)
 - 线程安全的读写操作
 - API 密钥轮询策略
 
-### 3. 中间件模式
+### 3. 会话管理模式 (Session Manager)
+
+为 Responses API 提供有状态的多轮对话支持：
+
+```go
+type SessionManager struct {
+    sessions       map[string]*Session
+    responseMap    map[string]string  // responseID -> sessionID
+    mu             sync.RWMutex
+    expiration     time.Duration
+    maxMessages    int
+    maxTokens      int
+}
+
+// 核心功能
+func (sm *SessionManager) GetOrCreateSession(previousResponseID string) (*Session, error)
+func (sm *SessionManager) AppendMessage(sessionID string, item ResponsesItem, tokens int)
+func (sm *SessionManager) UpdateLastResponseID(sessionID, responseID string)
+func (sm *SessionManager) RecordResponseMapping(responseID, sessionID string)
+```
+
+**特性**:
+- 自动会话创建和关联
+- 基于 `previous_response_id` 的会话追踪
+- 限制消息数量（默认 100 条）
+- 限制 Token 总数（默认 100k）
+- 自动过期清理（默认 24 小时）
+- 线程安全的并发访问
+
+**会话流程**:
+1. 首次请求：创建新会话，返回 `response_id`
+2. 后续请求：通过 `previous_response_id` 查找会话
+3. 自动追加用户输入和模型输出
+4. 响应中包含 `previous_id` 链接历史
+
+### 4. 转换器模式 (Converter Pattern) 🆕
+
+**v2.0.5 新增**：为 Responses API 提供统一的协议转换架构。
+
+#### 转换器接口
+
+```go
+type ResponsesConverter interface {
+    // 将 Responses 请求转换为上游服务格式
+    ToProviderRequest(sess *session.Session, req *types.ResponsesRequest) (interface{}, error)
+
+    // 将上游响应转换为 Responses 格式
+    FromProviderResponse(resp map[string]interface{}, sessionID string) (*types.ResponsesResponse, error)
+
+    // 获取上游服务名称
+    GetProviderName() string
+}
+```
+
+#### 已实现的转换器
+
+| 转换器 | 文件 | 转换方向 |
+|--------|------|----------|
+| `OpenAIChatConverter` | `openai_converter.go` | Responses ↔ OpenAI Chat Completions |
+| `OpenAICompletionsConverter` | `openai_converter.go` | Responses ↔ OpenAI Completions |
+| `ClaudeConverter` | `claude_converter.go` | Responses ↔ Claude Messages API |
+| `ResponsesPassthroughConverter` | `responses_passthrough.go` | Responses ↔ Responses (透传) |
+
+#### 工厂模式
+
+```go
+func NewConverter(serviceType string) ResponsesConverter {
+    switch serviceType {
+    case "openai":
+        return &OpenAIChatConverter{}
+    case "openaiold":
+        return &OpenAICompletionsConverter{}
+    case "claude":
+        return &ClaudeConverter{}
+    case "responses":
+        return &ResponsesPassthroughConverter{}
+    default:
+        return &OpenAIChatConverter{}
+    }
+}
+```
+
+#### 核心转换逻辑
+
+**1. Instructions 字段处理**
+
+```go
+// OpenAI: instructions → messages[0] (role: system)
+if req.Instructions != "" {
+    messages = append(messages, map[string]interface{}{
+        "role": "system",
+        "content": req.Instructions,
+    })
+}
+
+// Claude: instructions → system 参数（独立字段）
+if req.Instructions != "" {
+    claudeReq["system"] = req.Instructions
+}
+```
+
+**2. 嵌套 Content 数组提取**
+
+```go
+func extractTextFromContent(content interface{}) string {
+    // 1. 如果是 string，直接返回
+    if str, ok := content.(string); ok {
+        return str
+    }
+
+    // 2. 如果是 []ContentBlock，提取 input_text/output_text
+    if arr, ok := content.([]interface{}); ok {
+        texts := []string{}
+        for _, c := range arr {
+            if block["type"] == "input_text" || block["type"] == "output_text" {
+                texts = append(texts, block["text"])
+            }
+        }
+        return strings.Join(texts, "\n")
+    }
+
+    return ""
+}
+```
+
+**3. Message Type 区分**
+
+```go
+switch item.Type {
+case "message":
+    // 新格式：嵌套结构（type=message, role=user/assistant, content=[]ContentBlock）
+    role := item.Role  // 直接从 item.role 获取
+    contentText := extractTextFromContent(item.Content)
+
+case "text":
+    // 旧格式：简单 string（向后兼容）
+    contentStr := extractTextFromContent(item.Content)
+    role := item.Role  // 使用 role 字段，不再依赖 [ASSISTANT] 前缀
+}
+```
+
+#### 架构优势
+
+- **易于扩展** - 新增上游只需实现 `ResponsesConverter` 接口
+- **职责清晰** - 转换逻辑与 Provider 解耦
+- **可测试性** - 每个转换器可独立测试
+- **代码复用** - 公共逻辑提取到 `extractTextFromContent` 等基础函数
+- **统一流程** - 所有上游使用相同的转换流程
+
+#### 使用示例
+
+```go
+// 在 ResponsesProvider 中使用
+converter := converters.NewConverter(upstream.ServiceType)
+providerReq, err := converter.ToProviderRequest(sess, &responsesReq)
+```
+
+#### 支持的 Responses API 格式
+
+```json
+{
+  "model": "gpt-4",
+  "instructions": "You are a helpful assistant.",  // ✅ 新增
+  "input": [
+    {
+      "type": "message",  // ✅ 新增
+      "role": "user",     // ✅ 新增
+      "content": [
+        {
+          "type": "input_text",  // ✅ 新增
+          "text": "Hello!"
+        }
+      ]
+    }
+  ],
+  "previous_response_id": "resp_xxxxx",
+  "max_tokens": 1000
+}
+```
+
+**对比旧格式**：
+
+```json
+{
+  "model": "gpt-4",
+  "input": [
+    {
+      "type": "text",
+      "content": "Hello!"  // 简单 string
+    },
+    {
+      "type": "text",
+      "content": "[ASSISTANT]Hi there!"  // ❌ 使用前缀 hack
+    }
+  ]
+}
+```
+
+### 5. 中间件模式
 
 Express/Gin 使用中间件架构处理横切关注点：
 
@@ -174,7 +374,7 @@ graph TD
     O[File Watcher] --> N
 ```
 
-**流程说明**:
+**Messages API 流程说明**:
 1. 客户端请求到达 Gin 路由器
 2. 通过认证和日志中间件
 3. 路由处理器获取配置
@@ -183,6 +383,34 @@ graph TD
 6. 转换请求格式并发送到上游 API
 7. 接收上游响应并转换回 Claude 格式
 8. 记录日志并返回给客户端
+
+**Responses API 特殊流程**:
+```mermaid
+graph TD
+    A[Client Request] --> B[Responses Handler]
+    B --> C[Session Manager]
+    C --> D{检查 previous_response_id}
+    D -->|存在| E[获取现有会话]
+    D -->|不存在| F[创建新会话]
+    E --> G[Responses Provider]
+    F --> G
+    G --> H[上游 API]
+    H --> I[响应转换]
+    I --> J[更新会话历史]
+    J --> K[记录 Response Mapping]
+    K --> L[返回带 response_id 的响应]
+```
+
+**Responses API 会话管理**:
+1. 检查请求中的 `previous_response_id`
+2. 如存在，通过 `responseMap` 查找对应的会话
+3. 如不存在，创建新的会话 ID
+4. 将用户输入追加到会话历史
+5. 发送请求到上游 Responses API
+6. 将模型输出追加到会话历史
+7. 更新会话的 `last_response_id`
+8. 记录 `response_id` → `session_id` 映射
+9. 返回响应，包含 `id` (当前) 和 `previous_id` (上一轮)
 
 ## 技术选型决策
 
@@ -319,7 +547,8 @@ func AuthMiddleware() gin.HandlerFunc {
 **受保护的入口**:
 1. 前端管理界面 (`/`)
 2. 管理 API (`/api/*`)
-3. 代理 API (`/v1/messages`)
+3. Messages API (`/v1/messages`)
+4. Responses API (`/v1/responses`)
 
 **公开入口**:
 - 健康检查 (`/health`)

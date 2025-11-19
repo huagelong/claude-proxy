@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"fmt" // 新增
 	"net/http" // 新增
 	"strconv"
 	"strings"
@@ -269,11 +268,8 @@ func PingChannel(cfgManager *config.ConfigManager) gin.HandlerFunc {
 		channel := config.Upstream[id]
 		startTime := time.Now()
 
+		// 简化测试：只检查连通性，不关心HTTP状态码
 		testURL := strings.TrimSuffix(channel.BaseURL, "/")
-		switch channel.ServiceType {
-		case "openai", "openaiold", "gemini":
-			testURL += "/models"
-		}
 
 		client := httpclient.GetManager().GetStandardClient(5*time.Second, channel.InsecureSkipVerify)
 		req, err := http.NewRequest("HEAD", testURL, nil)
@@ -286,6 +282,7 @@ func PingChannel(cfgManager *config.ConfigManager) gin.HandlerFunc {
 		latency := time.Since(startTime).Milliseconds()
 
 		if err != nil {
+			// 网络连接失败
 			c.JSON(http.StatusOK, gin.H{
 				"success": false,
 				"latency": latency,
@@ -296,20 +293,12 @@ func PingChannel(cfgManager *config.ConfigManager) gin.HandlerFunc {
 		}
 		defer resp.Body.Close()
 
-		if resp.StatusCode >= 200 && resp.StatusCode < 400 {
-			c.JSON(http.StatusOK, gin.H{
-				"success": true,
-				"latency": latency,
-				"status":  "healthy",
-			})
-		} else {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"latency": latency,
-				"status":  "unhealthy",
-				"error":   fmt.Sprintf("Status code: %d", resp.StatusCode),
-			})
-		}
+		// 只要能完成请求就算成功，不检查HTTP状态码
+		c.JSON(http.StatusOK, gin.H{
+			"success": true,
+			"latency": latency,
+			"status":  "healthy",
+		})
 	}
 }
 
@@ -326,11 +315,8 @@ func PingAllChannels(cfgManager *config.ConfigManager) gin.HandlerFunc {
 				defer wg.Done()
 
 				startTime := time.Now()
+				// 简化测试：只检查连通性，不关心HTTP状态码
 				testURL := strings.TrimSuffix(ch.BaseURL, "/")
-				switch ch.ServiceType {
-				case "openai", "openaiold", "gemini":
-					testURL += "/models"
-				}
 
 				client := httpclient.GetManager().GetStandardClient(5*time.Second, ch.InsecureSkipVerify)
 				req, err := http.NewRequest("HEAD", testURL, nil)
@@ -343,16 +329,14 @@ func PingAllChannels(cfgManager *config.ConfigManager) gin.HandlerFunc {
 				latency := time.Since(startTime).Milliseconds()
 
 				if err != nil {
+					// 网络连接失败
 					results <- gin.H{"id": id, "name": ch.Name, "latency": latency, "status": "error", "error": err.Error()}
 					return
 				}
 				defer resp.Body.Close()
 
-				if resp.StatusCode >= 200 && resp.StatusCode < 400 {
-					results <- gin.H{"id": id, "name": ch.Name, "latency": latency, "status": "healthy"}
-				} else {
-					results <- gin.H{"id": id, "name": ch.Name, "latency": latency, "status": "unhealthy"}
-				}
+				// 只要能完成请求就算成功，不检查HTTP状态码
+				results <- gin.H{"id": id, "name": ch.Name, "latency": latency, "status": "healthy"}
 			}(i, channel)
 		}
 
@@ -369,3 +353,186 @@ func PingAllChannels(cfgManager *config.ConfigManager) gin.HandlerFunc {
 		c.JSON(http.StatusOK, finalResults)
 	}
 }
+
+// ============== Responses 渠道管理 API ==============
+
+// GetResponsesUpstreams 获取 Responses 上游列表
+func GetResponsesUpstreams(cfgManager *config.ConfigManager) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		cfg := cfgManager.GetConfig()
+
+		upstreams := make([]gin.H, len(cfg.ResponsesUpstream))
+		for i, up := range cfg.ResponsesUpstream {
+			upstreams[i] = gin.H{
+				"index":              i,
+				"name":               up.Name,
+				"serviceType":        up.ServiceType,
+				"baseUrl":            up.BaseURL,
+				"apiKeys":            up.APIKeys,
+				"description":        up.Description,
+				"website":            up.Website,
+				"insecureSkipVerify": up.InsecureSkipVerify,
+				"modelMapping":       up.ModelMapping,
+				"latency":            nil,
+				"status":             "unknown",
+			}
+		}
+
+		c.JSON(200, gin.H{
+			"channels":    upstreams,
+			"current":     cfg.CurrentResponsesUpstream,
+			"loadBalance": cfg.LoadBalance,
+		})
+	}
+}
+
+// AddResponsesUpstream 添加 Responses 上游
+func AddResponsesUpstream(cfgManager *config.ConfigManager) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var upstream config.UpstreamConfig
+		if err := c.ShouldBindJSON(&upstream); err != nil {
+			c.JSON(400, gin.H{"error": err.Error()})
+			return
+		}
+
+		if err := cfgManager.AddResponsesUpstream(upstream); err != nil {
+			c.JSON(500, gin.H{"error": err.Error()})
+			return
+		}
+
+		c.JSON(200, gin.H{"message": "Responses upstream added successfully"})
+	}
+}
+
+// UpdateResponsesUpstream 更新 Responses 上游
+func UpdateResponsesUpstream(cfgManager *config.ConfigManager) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		idStr := c.Param("id")
+		id, err := strconv.Atoi(idStr)
+		if err != nil {
+			c.JSON(400, gin.H{"error": "Invalid upstream ID"})
+			return
+		}
+
+		var updates config.UpstreamUpdate
+		if err := c.ShouldBindJSON(&updates); err != nil {
+			c.JSON(400, gin.H{"error": err.Error()})
+			return
+		}
+
+		if err := cfgManager.UpdateResponsesUpstream(id, updates); err != nil {
+			c.JSON(500, gin.H{"error": err.Error()})
+			return
+		}
+
+		c.JSON(200, gin.H{"message": "Responses upstream updated successfully"})
+	}
+}
+
+// DeleteResponsesUpstream 删除 Responses 上游
+func DeleteResponsesUpstream(cfgManager *config.ConfigManager) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		idStr := c.Param("id")
+		id, err := strconv.Atoi(idStr)
+		if err != nil {
+			c.JSON(400, gin.H{"error": "Invalid upstream ID"})
+			return
+		}
+
+		if _, err := cfgManager.RemoveResponsesUpstream(id); err != nil {
+			c.JSON(500, gin.H{"error": err.Error()})
+			return
+		}
+
+		c.JSON(200, gin.H{"message": "Responses upstream deleted successfully"})
+	}
+}
+
+// SetCurrentResponsesUpstream 设置当前 Responses 上游
+func SetCurrentResponsesUpstream(cfgManager *config.ConfigManager) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		idStr := c.Param("id")
+		id, err := strconv.Atoi(idStr)
+		if err != nil {
+			c.JSON(400, gin.H{"error": "Invalid upstream ID"})
+			return
+		}
+
+		if err := cfgManager.SetCurrentResponsesUpstream(id); err != nil {
+			c.JSON(500, gin.H{"error": err.Error()})
+			return
+		}
+
+		c.JSON(200, gin.H{"message": "Current Responses upstream set successfully"})
+	}
+}
+
+// AddResponsesApiKey 添加 Responses 渠道 API 密钥
+func AddResponsesApiKey(cfgManager *config.ConfigManager) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		idStr := c.Param("id")
+		id, err := strconv.Atoi(idStr)
+		if err != nil {
+			c.JSON(400, gin.H{"error": "Invalid upstream ID"})
+			return
+		}
+
+		var req struct {
+			APIKey string `json:"apiKey"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(400, gin.H{"error": "Invalid request body"})
+			return
+		}
+
+		if err := cfgManager.AddResponsesAPIKey(id, req.APIKey); err != nil {
+			if strings.Contains(err.Error(), "无效的上游索引") {
+				c.JSON(404, gin.H{"error": "Upstream not found"})
+			} else if strings.Contains(err.Error(), "API密钥已存在") {
+				c.JSON(400, gin.H{"error": "API密钥已存在"})
+			} else {
+				c.JSON(500, gin.H{"error": "Failed to save config"})
+			}
+			return
+		}
+
+		c.JSON(200, gin.H{
+			"message": "API密钥已添加",
+			"success": true,
+		})
+	}
+}
+
+// DeleteResponsesApiKey 删除 Responses 渠道 API 密钥
+func DeleteResponsesApiKey(cfgManager *config.ConfigManager) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		idStr := c.Param("id")
+		id, err := strconv.Atoi(idStr)
+		if err != nil {
+			c.JSON(400, gin.H{"error": "Invalid upstream ID"})
+			return
+		}
+
+		apiKey := c.Param("apiKey")
+		if apiKey == "" {
+			c.JSON(400, gin.H{"error": "API key is required"})
+			return
+		}
+
+		if err := cfgManager.RemoveResponsesAPIKey(id, apiKey); err != nil {
+			if strings.Contains(err.Error(), "无效的上游索引") {
+				c.JSON(404, gin.H{"error": "Upstream not found"})
+			} else if strings.Contains(err.Error(), "API密钥不存在") {
+				c.JSON(404, gin.H{"error": "API key not found"})
+			} else {
+				c.JSON(500, gin.H{"error": "Failed to save config"})
+			}
+			return
+		}
+
+		c.JSON(200, gin.H{
+			"message": "API密钥已删除",
+		})
+	}
+}
+

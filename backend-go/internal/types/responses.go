@@ -1,0 +1,78 @@
+package types
+
+// ============== Responses API 类型定义 ==============
+
+// ResponsesRequest Responses API 请求
+type ResponsesRequest struct {
+	Model              string      `json:"model"`
+	Instructions       string      `json:"instructions,omitempty"`       // 系统指令（映射为 system message）
+	Input              interface{} `json:"input"`                        // string 或 []ResponsesItem
+	PreviousResponseID string      `json:"previous_response_id,omitempty"`
+	Store              *bool       `json:"store,omitempty"`              // 默认 true
+	MaxTokens          int         `json:"max_tokens,omitempty"`         // 最大 tokens
+	Temperature        float64     `json:"temperature,omitempty"`        // 温度参数
+	TopP               float64     `json:"top_p,omitempty"`              // top_p 参数
+	FrequencyPenalty   float64     `json:"frequency_penalty,omitempty"`  // 频率惩罚
+	PresencePenalty    float64     `json:"presence_penalty,omitempty"`   // 存在惩罚
+	Stream             bool        `json:"stream,omitempty"`             // 是否流式输出
+	Stop               interface{} `json:"stop,omitempty"`               // 停止序列 (string 或 []string)
+	User               string      `json:"user,omitempty"`               // 用户标识
+	StreamOptions      interface{} `json:"stream_options,omitempty"`     // 流式选项
+}
+
+// ResponsesItem Responses API 消息项
+type ResponsesItem struct {
+	Type    string      `json:"type"`               // message, text, tool_call, tool_result
+	Role    string      `json:"role,omitempty"`     // user, assistant (用于 type=message)
+	Content interface{} `json:"content"`            // string 或 []ContentBlock
+	ToolUse *ToolUse    `json:"tool_use,omitempty"`
+}
+
+// ContentBlock 内容块（用于嵌套 content 数组）
+type ContentBlock struct {
+	Type string `json:"type"` // input_text, output_text
+	Text string `json:"text"`
+}
+
+// ToolUse 工具使用定义
+type ToolUse struct {
+	ID    string      `json:"id"`
+	Name  string      `json:"name"`
+	Input interface{} `json:"input"`
+}
+
+// ResponsesResponse Responses API 响应
+type ResponsesResponse struct {
+	ID         string          `json:"id"`
+	Model      string          `json:"model"`
+	Output     []ResponsesItem `json:"output"`
+	Status     string          `json:"status"` // completed, failed
+	PreviousID string          `json:"previous_id,omitempty"`
+	Usage      ResponsesUsage  `json:"usage"`
+	Created    int64           `json:"created,omitempty"`
+}
+
+// ResponsesUsage Responses API 使用统计
+type ResponsesUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
+// ResponsesStreamEvent Responses API 流式事件
+type ResponsesStreamEvent struct {
+	ID         string          `json:"id,omitempty"`
+	Model      string          `json:"model,omitempty"`
+	Output     []ResponsesItem `json:"output,omitempty"`
+	Status     string          `json:"status,omitempty"`
+	PreviousID string          `json:"previous_id,omitempty"`
+	Usage      *ResponsesUsage `json:"usage,omitempty"`
+	Type       string          `json:"type,omitempty"` // delta, done
+	Delta      *ResponsesDelta `json:"delta,omitempty"`
+}
+
+// ResponsesDelta 流式增量数据
+type ResponsesDelta struct {
+	Type    string      `json:"type,omitempty"`
+	Content interface{} `json:"content,omitempty"`
+}
